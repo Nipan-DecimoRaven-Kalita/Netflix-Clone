@@ -1,0 +1,14 @@
+{
+  "name": "netflix-omdb-clone",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n b,f -c blue,green \"npm run dev:b\" \"npm run dev:f\"",
+    "dev:f": "npm run dev --prefix frontend",
+    "dev:b": "npm run dev --prefix backend",
+    "install:all": "npm install && cd frontend && npm install && cd ../backend && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
