@@ -7,12 +7,24 @@ export default {
         netflix: {
           red: '#e50914',
           black: '#141414',
-          dark: '#000000',
+          'black-soft': '#1a1a1a',
+          gray: '#808080',
         },
       },
+      fontFamily: {
+        sans: ['Netflix Sans', 'Helvetica Neue', 'Helvetica', 'Arial', 'sans-serif'],
+      },
       backgroundImage: {
-        'gradient-netflix': 'linear-gradient(to bottom, rgba(20,20,20,0.6) 0%, rgba(0,0,0,0.9) 100%)',
-        'gradient-hero': 'linear-gradient(to right, rgba(0,0,0,0.8) 0%, transparent 50%, transparent 100%)',
+        'gradient-radial': 'radial-gradient(ellipse at center, var(--tw-gradient-stops))',
+      },
+      animation: {
+        'fade-in': 'fadeIn 0.3s ease-out',
+      },
+      keyframes: {
+        fadeIn: {
+          '0%': { opacity: '0' },
+          '100%': { opacity: '1' },
+        },
       },
     },
   },

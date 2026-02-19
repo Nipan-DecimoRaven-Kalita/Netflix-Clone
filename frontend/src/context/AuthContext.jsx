@@ -1,81 +1,68 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { AUTH, setAuthToken, clearAuthToken } from '../lib/api';
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import api from '../lib/api';
 
 const AuthContext = createContext(null);
 
-const REMEMBER_KEY = 'netflix_remember';
-const REMEMBER_DAYS = 30;
-
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
-  const [token, setTokenState] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
-
-  const loadUser = useCallback(async (authToken) => {
-    if (!authToken) {
-      setUser(null);
-      setTokenState(null);
-      return;
-    }
+  const [user, setUser] = useState(() => {
     try {
-      const prevToken = token;
-      setTokenState(authToken);
-      const data = await AUTH.me();
-      setUser(data.user);
+      return JSON.parse(localStorage.getItem('user'));
     } catch {
-      clearAuthToken();
-      setUser(null);
-      setTokenState(null);
+      return null;
     }
-  }, []);
+  });
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const t = localStorage.getItem('token') || sessionStorage.getItem('token');
-    if (t) {
-      loadUser(t).finally(() => setIsLoading(false));
-    } else {
-      setIsLoading(false);
+    const token = localStorage.getItem('token');
+    if (!token) {
+      setLoading(false);
+      return;
     }
-  }, [loadUser]);
+    // Validate token by making a simple request
+    api
+      .get('/movies/genres')
+      .then(() => setLoading(false))
+      .catch((err) => {
+        if (err.response?.status === 401) {
+          localStorage.removeItem('token');
+          localStorage.removeItem('user');
+          setUser(null);
+        }
+        setLoading(false);
+      });
+  }, []);
 
-  const login = useCallback(async (identifier, password, remember = false) => {
-    const data = await AUTH.login({ identifier, password });
-    setAuthToken(data.token, remember);
-    if (remember) {
-      const exp = Date.now() + REMEMBER_DAYS * 24 * 60 * 60 * 1000;
-      localStorage.setItem(REMEMBER_KEY, String(exp));
-    }
-    setTokenState(data.token);
+  const login = async (email, password) => {
+    const { data } = await api.post('/auth/login', { email, password });
+    localStorage.setItem('token', data.token);
+    localStorage.setItem('user', JSON.stringify(data.user));
     setUser(data.user);
     return data;
-  }, []);
-
-  const register = useCallback(async (name, email, username, password, confirmPassword) => {
-    const data = await AUTH.register({ name, email, username, password, confirmPassword });
-    setAuthToken(data.token, true);
-    setTokenState(data.token);
-    setUser(data.user);
-    return data;
-  }, []);
-
-  const logout = useCallback(() => {
-    clearAuthToken();
-    localStorage.removeItem(REMEMBER_KEY);
-    setUser(null);
-    setTokenState(null);
-  }, []);
-
-  const value = {
-    user,
-    token,
-    isLoading,
-    login,
-    logout,
-    register,
-    setUser,
   };
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  const register = async (username, email, name, password) => {
+    const { data } = await api.post('/auth/register', { username, email, name, password });
+    localStorage.setItem('token', data.token);
+    localStorage.setItem('user', JSON.stringify(data.user));
+    setUser(data.user);
+    return data;
+  };
+
+  const logout = async () => {
+    try {
+      await api.post('/auth/logout');
+    } catch {}
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    setUser(null);
+  };
+
+  return (
+    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
 }
 
 export function useAuth() {

@@ -1,52 +1,37 @@
-const API_BASE = import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? '' : 'http://localhost:5000');
+import axios from 'axios';
 
-function getToken() {
-  return localStorage.getItem('token') || sessionStorage.getItem('token');
-}
+const api = axios.create({
+  baseURL: '/api',
+  withCredentials: true,
+  headers: { 'Content-Type': 'application/json' },
+});
 
-export async function api(endpoint, options = {}) {
-  const url = endpoint.startsWith('http') ? endpoint : `${API_BASE}${endpoint}`;
-  const headers = {
-    'Content-Type': 'application/json',
-    ...options.headers,
-  };
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(url, { ...options, headers });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data.message || res.statusText);
-    err.status = res.status;
-    err.data = data;
-    throw err;
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token');
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+api.interceptors.response.use(
+  (res) => res,
+  async (err) => {
+    const original = err.config;
+    if (err.response?.status === 401 && !original._retry) {
+      original._retry = true;
+      try {
+        const { data } = await axios.post('/api/auth/refresh', {}, { withCredentials: true });
+        localStorage.setItem('token', data.token);
+        original.headers.Authorization = `Bearer ${data.token}`;
+        return api(original);
+      } catch (refreshErr) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        window.location.href = '/login';
+        return Promise.reject(refreshErr);
+      }
+    }
+    return Promise.reject(err);
   }
-  return data;
-}
+);
 
-export function setAuthToken(token, remember) {
-  if (remember) {
-    localStorage.setItem('token', token);
-  } else {
-    sessionStorage.setItem('token', token);
-  }
-}
-
-export function clearAuthToken() {
-  localStorage.removeItem('token');
-  sessionStorage.removeItem('token');
-}
-
-export const AUTH = {
-  register: (body) => api('/api/auth/register', { method: 'POST', body: JSON.stringify(body) }),
-  login: (body) => api('/api/auth/login', { method: 'POST', body: JSON.stringify(body) }),
-  me: () => api('/api/auth/me'),
-  checkEmail: (email) => fetch(`${API_BASE}/api/auth/check/email?email=${encodeURIComponent(email)}`).then((r) => r.json()),
-  checkUsername: (username) => fetch(`${API_BASE}/api/auth/check/username?username=${encodeURIComponent(username)}`).then((r) => r.json()),
-};
-
-export const MOVIES = {
-  trending: (page = 1) => api(`/api/movies/trending?page=${page}`),
-  list: (params) => api(`/api/movies/list?${new URLSearchParams(params)}`),
-  search: (q, page = 1) => api(`/api/movies/search?q=${encodeURIComponent(q)}&page=${page}`),
-  byId: (id) => api(`/api/movies/${id}`),
-};
+export default api;

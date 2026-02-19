@@ -1,40 +1,48 @@
-import path from 'path';
-import { fileURLToPath } from 'url';
-import dotenv from 'dotenv';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.join(__dirname, '.env') });
-
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import { connectDB } from './config/db.js';
+import cookieParser from 'cookie-parser';
+import { getDbConnection, initDb } from './config/db.js';
 import authRoutes from './routes/auth.js';
-import moviesRoutes from './routes/movies.js';
+import movieRoutes from './routes/movies.js';
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3001;
 
-connectDB();
-
+app.use(
+  cors({
+    origin: (process.env.CORS_ORIGIN || 'http://localhost:5173').split(',').map((o) => o.trim()),
+    credentials: true,
+  })
+);
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
-  credentials: true,
-}));
-app.use(express.json({ limit: '10kb' }));
+app.use(express.json());
+app.use(cookieParser());
 
 app.use('/api/auth', authRoutes);
-app.use('/api/movies', moviesRoutes);
+app.use('/api/movies', movieRoutes);
 
-app.get('/api/health', (_, res) => res.json({ ok: true }));
+app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(err.status || 500).json({
-    success: false,
-    message: err.message || 'Internal server error',
-  });
+  console.error(err);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+async function start() {
+  try {
+    const pool = await getDbConnection();
+    await initDb(pool);
+    console.log('Database connected and tables ready');
+  } catch (err) {
+    console.error('Database init failed:', err);
+    process.exit(1);
+  }
+
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+start();

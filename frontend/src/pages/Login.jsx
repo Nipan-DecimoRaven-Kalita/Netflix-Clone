@@ -1,131 +1,107 @@
-import { useState, useCallback, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { motion } from 'framer-motion';
-import toast from 'react-hot-toast';
+import React, { useState } from 'react';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { isValidEmail } from '../lib/validation';
 
 export default function Login() {
-  const navigate = useNavigate();
-  const { login, user } = useAuth();
-  const [identifier, setIdentifier] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [remember, setRemember] = useState(() => {
-    try {
-      return !!localStorage.getItem('netflix_remember');
-    } catch {
-      return false;
+  const [errors, setErrors] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const { login } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const from = location.state?.from?.pathname || '/';
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const errs = [];
+    if (!email) errs.push('Email is required');
+    else if (!isValidEmail(email)) errs.push('Invalid email format');
+    if (!password) errs.push('Password is required');
+    if (errs.length) {
+      setErrors(errs);
+      return;
     }
-  });
-  const [submitting, setSubmitting] = useState(false);
-  const [cooldown, setCooldown] = useState(0);
 
-  const handleSubmit = useCallback(
-    async (e) => {
-      e.preventDefault();
-      if (!identifier.trim() || !password || submitting || cooldown > 0) return;
-      setSubmitting(true);
-      try {
-        await login(identifier.trim(), password, remember);
-        toast.success('Welcome back!');
-        navigate('/', { replace: true });
-      } catch (err) {
-        const msg = err.message || '';
-        const isNetworkError = msg === 'Failed to fetch' || msg.includes('NetworkError') || err.name === 'TypeError';
-        toast.error(isNetworkError
-          ? "Can't reach the server. Start the backend: run npm run dev from the project folder (backend on port 5000)."
-          : (msg || 'Login failed'));
-        if (err.data?.cooldownSeconds) setCooldown(err.data.cooldownSeconds);
-      } finally {
-        setSubmitting(false);
-      }
-    },
-    [identifier, password, remember, login, navigate, submitting, cooldown]
-  );
-
-  useEffect(() => {
-    if (user) navigate('/');
-  }, [user, navigate]);
-
-  useEffect(() => {
-    if (cooldown <= 0) return;
-    const t = setInterval(() => setCooldown((c) => (c <= 1 ? 0 : c - 1)), 1000);
-    return () => clearInterval(t);
-  }, [cooldown]);
+    setLoading(true);
+    setErrors([]);
+    try {
+      await login(email, password);
+      navigate(from, { replace: true });
+    } catch (err) {
+      setErrors(err.response?.data?.errors || ['Login failed. Try again.']);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-netflix-black via-netflix-black to-black flex flex-col">
-      <header className="p-4 md:p-6">
-        <Link to="/" className="inline-block">
-          <span className="text-netflix-red text-3xl font-bold tracking-tight">NETFLIX</span>
+    <div className="min-h-screen bg-netflix-black flex flex-col">
+      <header className="p-6 flex justify-between items-center">
+        <Link to="/" className="text-3xl font-bold text-netflix-red">
+          NETFLIX
         </Link>
       </header>
-      <main className="flex-1 flex items-center justify-center p-4 pb-12">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="w-full max-w-md"
-        >
-          <h1 className="text-3xl font-bold mb-6">Sign In</h1>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">Username or Email</label>
-              <input
-                type="text"
-                value={identifier}
-                onChange={(e) => setIdentifier(e.target.value)}
-                placeholder="Username or email"
-                className="w-full bg-gray-800/80 border border-gray-600 rounded px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-netflix-red focus:border-transparent"
-                autoComplete="username"
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">Password</label>
-              <div className="relative">
+
+      <main className="flex-1 flex items-center justify-center px-4 py-12">
+        <div className="w-full max-w-md">
+          <div className="bg-black/80 backdrop-blur-sm rounded-lg p-10 shadow-2xl border border-white/10">
+            <h1 className="text-3xl font-bold mb-6">Sign In</h1>
+            <form onSubmit={handleSubmit} className="space-y-5">
+              {errors.length > 0 && (
+                <div className="p-3 bg-red-500/20 border border-red-500/50 rounded text-red-300 text-sm">
+                  {errors.map((e, i) => (
+                    <p key={i}>{e}</p>
+                  ))}
+                </div>
+              )}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Email</label>
                 <input
-                  type={showPassword ? 'text' : 'password'}
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full px-4 py-3 bg-gray-900/80 border border-gray-600 rounded focus:outline-none focus:ring-2 focus:ring-netflix-red focus:border-transparent placeholder-gray-500"
+                  placeholder="you@example.com"
+                  autoComplete="email"
+                  disabled={loading}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Password</label>
+                <input
+                  type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Password"
-                  className="w-full bg-gray-800/80 border border-gray-600 rounded px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-netflix-red focus:border-transparent pr-12"
+                  className="w-full px-4 py-3 bg-gray-900/80 border border-gray-600 rounded focus:outline-none focus:ring-2 focus:ring-netflix-red focus:border-transparent placeholder-gray-500"
+                  placeholder="••••••••"
                   autoComplete="current-password"
+                  disabled={loading}
                 />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword((p) => !p)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white text-sm"
-                  aria-label={showPassword ? 'Hide password' : 'Show password'}
-                >
-                  {showPassword ? 'Hide' : 'Show'}
-                </button>
               </div>
-            </div>
-            <div className="flex items-center justify-between">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={remember}
-                  onChange={(e) => setRemember(e.target.checked)}
-                  className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-netflix-red focus:ring-netflix-red"
-                />
-                <span className="text-sm text-gray-400">Remember me (30 days)</span>
-              </label>
-              <Link to="/login" className="text-sm text-gray-400 hover:text-netflix-red">Forgot password?</Link>
-            </div>
-            <button
-              type="submit"
-              disabled={submitting || cooldown > 0}
-              className="w-full py-3 bg-netflix-red rounded font-semibold text-lg hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center justify-center gap-2"
-            >
-              {submitting ? <span className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : null}
-              {cooldown > 0 ? `Try again in ${cooldown}s` : 'Sign In'}
-            </button>
-          </form>
-          <p className="text-gray-400 mt-6 text-center">
-            New to Netflix?{' '}
-            <Link to="/register" className="text-netflix-red hover:underline">Create an account</Link>
-          </p>
-        </motion.div>
+              <Link
+                to="/forgot-password"
+                className="text-sm text-gray-400 hover:text-white block"
+              >
+                Forgot password?
+              </Link>
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full py-3 bg-netflix-red hover:bg-red-600 rounded font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loading ? 'Signing In...' : 'Sign In'}
+              </button>
+            </form>
+            <p className="mt-6 text-gray-400 text-center">
+              New to Netflix?{' '}
+              <Link to="/register" className="text-white hover:underline font-medium">
+                Sign up now
+              </Link>
+            </p>
+          </div>
+        </div>
       </main>
     </div>
   );

@@ -1,93 +1,94 @@
 import express from 'express';
-import { query, param, validationResult } from 'express-validator';
-import { authGuard } from '../middleware/auth.js';
+import { authMiddleware } from '../middleware/auth.js';
 
 const router = express.Router();
-const OMDB_BASE = process.env.OMDB_BASE_URL || 'https://www.omdbapi.com/';
-const API_KEY = process.env.OMDB_API_KEY || '278e1ea3';
+const OMDB_API_KEY = process.env.OMDB_API_KEY;
+const OMDB_BASE = 'https://www.omdbapi.com/';
 
-function buildUrl(params) {
-  const url = new URL(OMDB_BASE);
-  url.searchParams.set('apikey', API_KEY);
-  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, String(v)));
-  return url.toString();
+const GENRES = ['Action', 'Adventure', 'Animation', 'Comedy', 'Crime', 'Drama', 'Horror', 'Sci-Fi'];
+
+const cache = new Map();
+const CACHE_TTL = 1000 * 60 * 60; // 1 hour
+
+async function fetchOMDb(search, type = 'movie') {
+  const key = `${search}-${type}`;
+  const cached = cache.get(key);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
+
+  const url = `${OMDB_BASE}?apikey=${OMDB_API_KEY}&s=${encodeURIComponent(search)}&type=${type}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.Response === 'True') {
+    cache.set(key, { data, ts: Date.now() });
+  }
+  return data;
 }
 
-router.get('/trending', authGuard, [
-  query('page').optional().isInt({ min: 1, max: 10 }).toInt(),
-], async (req, res) => {
+async function fetchOMDbById(id) {
+  const key = `id-${id}`;
+  const cached = cache.get(key);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
+
+  const url = `${OMDB_BASE}?apikey=${OMDB_API_KEY}&i=${encodeURIComponent(id)}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.Response === 'True') {
+    cache.set(key, { data, ts: Date.now() });
+  }
+  return data;
+}
+
+router.get('/genres', authMiddleware, async (req, res) => {
   try {
-    const page = req.query.page || 1;
-    const url = buildUrl({ s: 'the', type: 'movie', page });
-    const resp = await fetch(url);
-    const data = await resp.json();
-    if (data.Response === 'False') {
-      return res.json({ success: true, movies: [], total: 0 });
+    if (!OMDB_API_KEY) {
+      return res.status(500).json({ error: 'OMDb API key not configured' });
     }
-    res.json({ success: true, movies: data.Search || [], total: parseInt(data.totalResults, 10) || 0 });
+
+    const results = {};
+    for (const genre of GENRES) {
+      const data = await fetchOMDb(genre);
+      if (data?.Search) {
+        results[genre] = data.Search.map((m) => ({
+          imdbID: m.imdbID,
+          Title: m.Title,
+          Year: m.Year,
+          Poster: m.Poster,
+          Type: m.Type,
+        }));
+      } else {
+        results[genre] = [];
+      }
+    }
+
+    res.json(results);
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message || 'Failed to fetch trending' });
+    console.error('Movies error:', err);
+    res.status(500).json({ error: 'Failed to fetch movies' });
   }
 });
 
-router.get('/list', authGuard, [
-  query('s').trim().notEmpty().withMessage('Search term required'),
-  query('page').optional().isInt({ min: 1, max: 10 }).toInt(),
-  query('y').optional().trim(),
-  query('type').optional().isIn(['movie', 'series', 'episode']),
-], async (req, res) => {
+router.get('/:id', authMiddleware, async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(400).json({ success: false, message: errors.array()[0]?.msg });
-    const page = req.query.page || 1;
-    const params = { s: req.query.s, page };
-    if (req.query.y) params.y = req.query.y;
-    if (req.query.type) params.type = req.query.type;
-    const url = buildUrl(params);
-    const resp = await fetch(url);
-    const data = await resp.json();
-    if (data.Response === 'False') {
-      return res.json({ success: true, movies: [], total: 0 });
+    const { id } = req.params;
+    const data = await fetchOMDbById(id);
+    if (!data || data.Response === 'False') {
+      return res.status(404).json({ error: 'Movie not found' });
     }
-    res.json({ success: true, movies: data.Search || [], total: parseInt(data.totalResults, 10) || 0 });
+    res.json({
+      imdbID: data.imdbID,
+      Title: data.Title,
+      Year: data.Year,
+      Poster: data.Poster,
+      imdbRating: data.imdbRating,
+      Plot: data.Plot,
+      Genre: data.Genre,
+      Runtime: data.Runtime,
+      Director: data.Director,
+      Actors: data.Actors,
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message || 'Failed to fetch list' });
-  }
-});
-
-router.get('/search', authGuard, [
-  query('q').trim().notEmpty().withMessage('Query required'),
-  query('page').optional().isInt({ min: 1 }).toInt(),
-], async (req, res) => {
-  try {
-    const q = req.query.q?.trim() || '';
-    const page = req.query.page || 1;
-    const url = buildUrl({ s: q, page });
-    const resp = await fetch(url);
-    const data = await resp.json();
-    if (data.Response === 'False') {
-      return res.json({ success: true, movies: [], total: 0 });
-    }
-    res.json({ success: true, movies: data.Search || [], total: parseInt(data.totalResults, 10) || 0 });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message || 'Search failed' });
-  }
-});
-
-router.get('/:id', authGuard, [
-  param('id').trim().notEmpty(),
-], async (req, res) => {
-  try {
-    const id = req.params.id.startsWith('tt') ? req.params.id : `tt${req.params.id}`;
-    const url = buildUrl({ i: id, plot: 'full' });
-    const resp = await fetch(url);
-    const data = await resp.json();
-    if (data.Response === 'False') {
-      return res.status(404).json({ success: false, message: 'Movie not found' });
-    }
-    res.json({ success: true, movie: data });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message || 'Failed to fetch movie' });
+    console.error('Movie detail error:', err);
+    res.status(500).json({ error: 'Failed to fetch movie' });
   }
 });
 

@@ -1,145 +1,174 @@
 import express from 'express';
+import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
-import { body, query, validationResult } from 'express-validator';
-import User from '../models/User.js';
-import { authGuard } from '../middleware/auth.js';
-import { authLimiter, loginLimiter } from '../middleware/rateLimit.js';
+import { getDbConnection } from '../config/db.js';
+import { validateRegister, validateLogin, sanitize } from '../utils/validation.js';
+import { loginRateLimiter } from '../middleware/rateLimit.js';
 
 const router = express.Router();
-const COOLDOWN_MS = 30 * 1000;
-const MAX_FAILED = 3;
-const failedAttempts = new Map();
+const SALT_ROUNDS = 12;
 
-function getCooldownRemaining(identifier) {
-  const entry = failedAttempts.get(identifier);
-  if (!entry || !entry.lockedUntil) return 0;
-  const remaining = entry.lockedUntil - Date.now();
-  return remaining > 0 ? Math.ceil(remaining / 1000) : 0;
-}
-
-const registerValidation = [
-  body('name').trim().isLength({ min: 2 }).withMessage('Name must be at least 2 characters').matches(/^[a-zA-Z\s]+$/).withMessage('Name must contain only letters'),
-  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
-  body('username').trim().isLength({ min: 3, max: 20 }).withMessage('Username 3-20 characters').matches(/^\S+$/).withMessage('No spaces allowed'),
-  body('password').isLength({ min: 8 }).withMessage('Password must be 8+ characters').matches(/(?=.*[A-Z])/).withMessage('At least one uppercase').matches(/(?=.*[0-9])/).withMessage('At least one number').matches(/(?=.*[!@#$%^&*(),.?":{}|<>])/).withMessage('At least one special character'),
-  body('confirmPassword').custom((val, { req }) => val === req.body.password).withMessage('Passwords must match'),
-];
-
-router.post('/register', authLimiter, registerValidation, async (req, res) => {
+router.post('/register', async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, message: errors.array()[0].msg, errors: errors.array() });
+    const { username, email, name, password } = req.body;
+    const validation = validateRegister({ username, email, name, password });
+    if (!validation.valid) {
+      return res.status(400).json({ errors: validation.errors });
     }
-    const { name, email, username, password } = req.body;
-    const existingEmail = await User.findOne({ email });
-    if (existingEmail) return res.status(400).json({ success: false, message: 'Email already registered' });
-    const existingUsername = await User.findOne({ username });
-    if (existingUsername) return res.status(400).json({ success: false, message: 'Username already taken' });
-    const user = await User.create({ name, email, username, password });
+
+    const pool = await getDbConnection();
+    const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+
+    await pool.execute(
+      'INSERT INTO users (username, email, name, password_hash) VALUES (?, ?, ?, ?)',
+      [validation.data.username, validation.data.email, validation.data.name, passwordHash]
+    );
+
+    const [rows] = await pool.execute('SELECT id, username, email, name FROM users WHERE email = ?', [
+      validation.data.email,
+    ]);
+    const user = rows[0];
+
     const token = jwt.sign(
-      { userId: user._id },
+      { userId: user.id, email: user.email },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
+      { expiresIn: process.env.JWT_EXPIRY || '24h' }
     );
+
     const refreshToken = jwt.sign(
-      { userId: user._id, type: 'refresh' },
-      process.env.JWT_SECRET,
-      { expiresIn: '7d' }
+      { userId: user.id },
+      process.env.JWT_REFRESH_SECRET,
+      { expiresIn: process.env.JWT_REFRESH_EXPIRY || '7d' }
     );
+
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
     res.status(201).json({
-      success: true,
+      user: { id: user.id, username: user.username, email: user.email, name: user.name },
       token,
       refreshToken,
-      expiresIn: 24 * 60 * 60,
-      user: { id: user._id, name: user.name, email: user.email, username: user.username },
+      expiresIn: 86400,
     });
   } catch (err) {
-    const isDbError = err.name === 'MongooseServerSelectionError' || err.message?.includes('MongoNetworkError') || err.message?.includes('connect');
-    res.status(500).json({
-      success: false,
-      message: isDbError
-        ? 'Database not connected. Add a valid MONGO_URI to backend/.env and restart the backend.'
-        : (err.message || 'Registration failed'),
-    });
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(400).json({ errors: ['Email or username already exists'] });
+    }
+    console.error('Register error:', err);
+    res.status(500).json({ error: 'Registration failed' });
   }
 });
 
-router.post('/login', authLimiter, loginLimiter, [
-  body('identifier').trim().notEmpty().withMessage('Username or email required'),
-  body('password').notEmpty().withMessage('Password required'),
-], async (req, res) => {
+router.post('/login', loginRateLimiter, async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, message: errors.array()[0].msg });
+    const { email, password } = req.body;
+    const validation = validateLogin({ email, password });
+    if (!validation.valid) {
+      return res.status(400).json({ errors: validation.errors });
     }
-    const { identifier, password } = req.body;
-    const key = identifier.toLowerCase();
-    const remaining = getCooldownRemaining(key);
-    if (remaining > 0) {
-      return res.status(429).json({
-        success: false,
-        message: `Too many failed attempts. Try again in ${remaining} seconds.`,
-        cooldownSeconds: remaining,
-      });
+
+    const pool = await getDbConnection();
+    const [rows] = await pool.execute(
+      'SELECT id, username, email, name, password_hash FROM users WHERE email = ?',
+      [validation.data.email]
+    );
+
+    const user = rows[0];
+    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+      return res.status(401).json({ errors: ['Invalid email or password'] });
     }
-    const user = await User.findOne({
-      $or: [{ email: key }, { username: new RegExp(`^${identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }],
-    }).select('+password');
-    if (!user || !(await user.comparePassword(password))) {
-      const entry = failedAttempts.get(key) || { count: 0 };
-      entry.count += 1;
-      if (entry.count >= MAX_FAILED) {
-        entry.lockedUntil = Date.now() + COOLDOWN_MS;
-        entry.count = 0;
-      }
-      failedAttempts.set(key, entry);
-      return res.status(401).json({ success: false, message: 'Invalid username/email or password' });
-    }
-    failedAttempts.delete(key);
+
     const token = jwt.sign(
-      { userId: user._id },
+      { userId: user.id, email: user.email },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
+      { expiresIn: process.env.JWT_EXPIRY || '24h' }
     );
+
     const refreshToken = jwt.sign(
-      { userId: user._id, type: 'refresh' },
-      process.env.JWT_SECRET,
-      { expiresIn: '7d' }
+      { userId: user.id },
+      process.env.JWT_REFRESH_SECRET,
+      { expiresIn: process.env.JWT_REFRESH_EXPIRY || '7d' }
     );
+
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
     res.json({
-      success: true,
+      user: { id: user.id, username: user.username, email: user.email, name: user.name },
       token,
       refreshToken,
-      expiresIn: 24 * 60 * 60,
-      user: { id: user._id, name: user.name, email: user.email, username: user.username },
+      expiresIn: 86400,
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message || 'Login failed' });
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'Login failed' });
   }
 });
 
-router.get('/me', authGuard, (req, res) => {
-  res.json({ success: true, user: req.user });
+router.post('/logout', (req, res) => {
+  res.clearCookie('token');
+  res.clearCookie('refreshToken');
+  res.json({ success: true });
 });
 
-router.get('/check/email', authLimiter, [
-  query('email').isEmail().normalizeEmail(),
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.json({ available: false });
-  const existing = await User.findOne({ email: req.query.email });
-  res.json({ available: !existing });
-});
+router.post('/refresh', async (req, res) => {
+  try {
+    const refreshToken = req.cookies?.refreshToken || req.body?.refreshToken;
+    if (!refreshToken) {
+      return res.status(401).json({ error: 'Refresh token required' });
+    }
 
-router.get('/check/username', authLimiter, [
-  query('username').trim().isLength({ min: 3, max: 20 }),
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.json({ available: false });
-  const existing = await User.findOne({ username: new RegExp(`^${req.query.username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') });
-  res.json({ available: !existing });
+    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+    const pool = await getDbConnection();
+    const [rows] = await pool.execute('SELECT id, username, email, name FROM users WHERE id = ?', [
+      decoded.userId,
+    ]);
+    const user = rows[0];
+    if (!user) return res.status(401).json({ error: 'User not found' });
+
+    const token = jwt.sign(
+      { userId: user.id, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRY || '24h' }
+    );
+
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+
+    res.json({
+      user: { id: user.id, username: user.username, email: user.email, name: user.name },
+      token,
+      expiresIn: 86400,
+    });
+  } catch (err) {
+    res.clearCookie('token');
+    res.clearCookie('refreshToken');
+    return res.status(401).json({ error: 'Invalid refresh token' });
+  }
 });
 
 export default router;

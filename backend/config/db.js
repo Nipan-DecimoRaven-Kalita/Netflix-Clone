@@ -1,16 +1,46 @@
-import mongoose from 'mongoose';
+import mysql from 'mysql2/promise';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 
-export async function connectDB() {
-  const uri = process.env.MONGO_URI;
-  if (!uri || uri.includes('<') || uri.includes('xxxxx')) {
-    console.warn('MongoDB: No valid MONGO_URI in backend/.env — server will run but registration/login will fail until you add a real connection string.');
-    return;
-  }
-  try {
-    await mongoose.connect(uri);
-    console.log('MongoDB connected');
-  } catch (err) {
-    console.error('MongoDB connection error:', err.message);
-    console.warn('Server is still running. Add a valid MONGO_URI in backend/.env to enable auth.');
-  }
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+let pool;
+
+export async function getDbConnection() {
+  if (pool) return pool;
+
+  const caPath = path.join(__dirname, '../ca.pem');
+  const sslConfig = fs.existsSync(caPath)
+    ? { ca: fs.readFileSync(caPath), rejectUnauthorized: true }
+    : undefined;
+
+  // Strip ssl-mode from URL to avoid mysql2 warning (we pass ssl explicitly)
+  const rawUrl = process.env.DATABASE_URL || '';
+  const dbUrl = rawUrl.replace(/[?&]ssl-mode=[^&]*/g, '').replace(/\?&/, '?').replace(/\?$/, '');
+  const needsSSL = rawUrl.includes('ssl-mode=REQUIRED');
+
+  pool = mysql.createPool({
+    uri: dbUrl || rawUrl,
+    ssl: sslConfig || (needsSSL ? { rejectUnauthorized: true } : undefined),
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+  });
+
+  return pool;
+}
+
+export async function initDb(conn) {
+  const p = conn || await getDbConnection();
+  await p.execute(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      username VARCHAR(50) UNIQUE NOT NULL,
+      email VARCHAR(255) UNIQUE NOT NULL,
+      name VARCHAR(100) NOT NULL,
+      password_hash VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
 }
