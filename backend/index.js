@@ -30,19 +30,35 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-async function start() {
+// Initialize database connection (cached for serverless)
+let dbInitialized = false;
+async function initializeDb() {
+  if (dbInitialized) return;
   try {
     const pool = await getDbConnection();
     await initDb(pool);
+    dbInitialized = true;
     console.log('Database connected and tables ready');
   } catch (err) {
     console.error('Database init failed:', err);
-    process.exit(1);
+    // Don't throw in serverless - allow graceful degradation
+    if (!process.env.VERCEL) throw err;
   }
-
-  app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
 }
 
-start();
+// Export for Vercel serverless (must be at top level)
+export default app;
+
+// For local development
+if (!process.env.VERCEL) {
+  async function start() {
+    await initializeDb();
+    app.listen(PORT, () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+  }
+  start();
+} else {
+  // Initialize DB on cold start for Vercel (non-blocking)
+  initializeDb().catch(console.error);
+}
